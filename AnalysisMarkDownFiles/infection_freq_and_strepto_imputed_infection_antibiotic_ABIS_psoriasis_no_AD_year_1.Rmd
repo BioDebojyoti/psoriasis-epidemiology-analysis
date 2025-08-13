@@ -1,0 +1,1781 @@
+---
+title: "Infections and antibiotics: ABIS-psoriasis year-1 excluding auto-immune diseases"
+author: "Debojyoti Das"
+date: "2024-03-04"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+path <- "/Users/debda22/Projects/ingrid_asp_psoriasis_research_center"
+output_dir <- paste0(path,"/infection_antibiotic_year_wise/with_overall_freq_imputation_infection_antibiotic_1_year_revision")
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir, recursive = TRUE)
+}
+```
+
+
+```{r}
+pacman::p_load(
+  haven,        # File import
+  here,         # File locator
+  sjlabelled,
+  readxl,
+  writexl,
+  janitor,      # 
+  data.table,   #
+  flextable,    #
+  comprehenr,   # List comprehension in R
+  tidyverse,    # data management + ggplot2 graphics, 
+  stringr,      # manipulate text strings 
+  purrr,        # loop over objects in a tidy way
+  gtsummary,    # summary statistics and tests 
+  broom,        # tidy up results from regressions
+  lmtest,       # likelihood-ratio tests
+  parameters,   # alternative to tidy up results from regressions
+  see,          # alternative to visualize forest plots
+  easystats,    # Forest plot
+  kableExtra,
+  forestploter,
+  rempsyc,
+  ggpubr,
+  lattice,
+  naniar,
+  VIM,
+  mice,          # multivariate
+  howManyImputations,
+  CALIBERrfimpute,
+  miceRanger,
+  parallel,
+  furrr,
+  parameters,
+  glmglrt,
+  MASS,
+  survival,
+  officer,
+  logistf,
+  EValue
+  )
+```
+
+load helping functions
+
+```{r, include=FALSE}
+# helper functions for imputation
+src_path <- paste0(path,"/infection_and_antibiotics")
+source(paste0(src_path, "/Functions_rmph.R"))
+source(paste0(src_path, "/antibiotics_and_infections_helper_functions.R"))
+source(paste0(src_path, "/all_parameters_infection_antibiotics_ABIS_year_1.R"))
+```
+
+Read cohort data from SAV format file
+
+```{r}
+data_path <- paste0(path,"/Linkoping_projects/ABIS_RAW_DATA_SPSS")
+abis_table <- read_sav(paste0(data_path, "/ABIS_data_base.sav"))
+psoriasis_diagonistic_table <- read_sav(paste0(data_path,"/L40_corrected.sav"))
+severity <- readxl::read_excel(paste0(data_path,"/Psoriasis  severity.xlsx"))
+```
+
+save ABISnr who participated in year-1
+```{r}
+participants_ABISnr <- (abis_table %>% dplyr::filter(par_1==1))$ABISnr
+```
+
+
+```{r}
+severity <- severity %>%
+  dplyr::mutate(
+    severity = case_when(
+      grepl("sever",`Mild form`,ignore.case = TRUE) ~ "severe",
+      grepl("mild",`Mild form`,ignore.case = TRUE) ~ "mild",
+      TRUE ~ NA
+      )
+  ) %>% dplyr::select(ABISnr, severity)      
+
+severe_psoriasis_abis <- (severity %>% dplyr::filter(severity == "severe"))$ABISnr
+mild_psoriasis_abis <- (severity %>% dplyr::filter(severity == "mild"))$ABISnr
+```
+
+
+```{r}
+i=0
+Name <- c()
+Label <- c()
+for (col in names(abis_table)){
+  
+  i=i+1
+  Name <- c(Name,col)
+  
+  curr_col_attribute <- attr(abis_table[[col]], "label")
+  
+  if (is.null(curr_col_attribute)||(length(curr_col_attribute)>1)){
+    Label <- c(Label, col)
+    } else {
+    Label <- c(Label, curr_col_attribute)
+    }
+} 
+
+abis_table_labels <- 
+  data.frame("Name" = Name, "Label" = Label)
+
+psoriasis_diagonistic_table.labels <- 
+  to_vec(for (col in names(psoriasis_diagonistic_table)) 
+    if(is.null(attr(psoriasis_diagonistic_table[[col]], "label"))) col 
+    else attr(psoriasis_diagonistic_table[[col]], "label"))
+
+psoriasis_diagonistic_labels <- 
+  data.frame("Name" = names(psoriasis_diagonistic_table), 
+             "Label" = psoriasis_diagonistic_table.labels)
+```
+
+
+```{r}
+abis_table_original_infection_txt <- abis_table[,c("ABISnr", "b_12txt")]
+
+abis_table <- abis_table[,c(
+  "ABISnr",
+  "barn_år_mån", 
+  "ageC_1",
+  "par_1",
+  "b_3a",  
+  "b_3b",         
+  "b_4a",  
+  "b_4b",    
+  "b_4c",                
+  "b_4d",
+  "b_4e",
+  "b_12a",
+  "b_12b",
+  "b_12c",
+  "b_12d",
+  "b_12e",              
+  "b_42a",
+  "b_42b",
+  "b_42c",
+  "b_42d",
+  "b_42e",
+  "b_42f",
+  "b_42g",
+  ################### confounders ################################
+  ################### psoriasis in family #######################
+  "e_34p_1",
+  "e_34p_2",
+  "e_34p_3",
+  "f_28o_1",
+  "f_28o_2",
+  "f_28o_3",
+  "gv_21o1",
+  "gv_21o2",
+  "gv_21o3",
+  ################## confounders ################################
+  "Gender", # sex
+  "b_5",    # exclusive breast-feeding   
+  "fr_12",  # gestation (in weeks)
+  "fr_27",  # education mother
+  "fr_28"   # education father
+)]
+
+names(attr(abis_table$b_42g, "labels")) <- c("Never", "1-2 times", "3-5 times", "6 times or more")
+
+abis_table <- abis_table %>% 
+  dplyr::mutate(
+    child_dob = as.Date(as.yearmon(as.character(barn_år_mån), format = "%Y%m")),
+    infection_frequency = pmax(b_42a, b_42b, b_42c, b_42d, b_42e, 
+                               b_42f, b_42g, na.rm = TRUE) 
+    ) %>%
+  dplyr::select(-c(b_42e, b_42f, b_42g))
+```
+
+Merge the data to include psoriasis diagonistics
+
+```{r}
+psoriasis_data_full <- left_join(abis_table, 
+                             psoriasis_diagonistic_table,
+                             by = "ABISnr") %>% 
+ dplyr::mutate(Diagnos = replace(Diagnos, is.na(Diagnos), "")) %>%
+  # reformat the date (of detection)
+ dplyr::mutate(
+    first_detection = as.Date(as.character(övFörsta), format = "%Y%m%d"), 
+    second_detection = as.Date(as.character(övSenaste), format = "%Y%m%d")
+    ) %>%
+ dplyr::mutate(
+    age_first_detection = lubridate::time_length(
+      difftime(first_detection,child_dob), "years"),
+    age_second_detection = lubridate::time_length(
+      difftime(second_detection,child_dob), "years")
+  ) %>% mutate_if(is.numeric, round,2)
+
+```
+
+Remove attributes
+
+```{r}
+
+for (col in names(psoriasis_data_full)) {
+  for (atr in c("label","label","format.spss", "names", "display_width")){
+    if(!(is.null(attr(psoriasis_data_full[[col]], atr)))){
+      attr(psoriasis_data_full[[col]], atr) <- NULL
+      }
+  }   
+}
+
+attr(psoriasis_data_full, "notes") <- NULL
+
+for (col in names(psoriasis_data_full)) {
+  if(is.labelled(psoriasis_data_full[[col]])){
+    psoriasis_data_full[col] <- unlabel(psoriasis_data_full[[col]])
+  }
+}
+
+psoriasis_data_full <- as.data.frame(psoriasis_data_full)
+```
+
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%
+ dplyr::mutate(
+    composite_psoriasis_heredity = pmin(
+      e_34p_1,
+      e_34p_2,
+      e_34p_3,
+      f_28o_1,
+      f_28o_2,
+      f_28o_3,
+      gv_21o1,
+      gv_21o2,
+      gv_21o3, 
+      na.rm = TRUE)
+    ) %>% 
+ dplyr::mutate(
+    first_degree_psoriasis_heredity = ifelse(
+      is.na(composite_psoriasis_heredity),0,1)
+  ) %>% 
+  dplyr::mutate(
+  time = ifelse(
+    par_1 != 1,
+    NA,
+    ifelse(is.na(ageC_1),1.00,round(ageC_1/12,2))),
+  event =  ifelse(
+    par_1 != 1,
+    NA,
+    ifelse(
+      is.na(age_first_detection),
+      0,
+      ifelse(age_first_detection<=time,1,0)))
+) %>%
+  dplyr::select(-c(composite_psoriasis_heredity,
+            child_dob,barn_år_mån,
+            e_34p_1,e_34p_2,e_34p_3,
+            f_28o_1,f_28o_2,f_28o_3,
+            gv_21o1,gv_21o2,gv_21o3,
+            övAntal,övFörsta,övSenaste,
+            first_detection,second_detection,
+            par_1, ageC_1
+            )
+         )
+```
+
+convert dichotomous variables to 0/1
+
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%  
+ dplyr::mutate(across(                                      
+    .cols = all_of(c("Diagnos")),  ## for each column listed and "outcome"
+    .fns = ~case_when(                              
+      . %in% c("L40") ~ 1,  ## recode L40 (psoriasis diagnosis) to 1
+      . %in% c("") ~ 0,       ## not present  to 0
+      TRUE ~ NA_real_)        ## otherwise set to missing
+    )
+  ) 
+  
+```
+
+remove cases with other auto immune diseases other than psoriasis
+
+```{r}
+print("number of participants with other autoimmune diseases")
+print(
+  nrow(
+    psoriasis_data_full[
+      which((
+        (psoriasis_data_full$AutoimmDisease == 1)&
+          (psoriasis_data_full$Diagnos != 1))),]))
+
+print("number of participants before filtering")
+print(nrow(psoriasis_data_full))
+
+print("number of first order heredity psoriasis cases before filtering")
+print(psoriasis_data_full %>% 
+        dplyr::filter(first_degree_psoriasis_heredity == 1) %>%
+        nrow()
+      )
+
+psoriasis_data_full <- psoriasis_data_full %>% 
+  dplyr::filter(!((AutoimmDisease == 1)&(Diagnos != 1)))
+
+# remove rows with missing sex information
+psoriasis_data_full <- psoriasis_data_full %>% dplyr::filter(!is.na(Gender))
+
+print("number of participants after filtering")
+print(nrow(psoriasis_data_full))
+
+print("number of first order heredity psoriasis cases after filtering")
+print(psoriasis_data_full %>% 
+        dplyr::filter(first_degree_psoriasis_heredity == 1) %>%
+        nrow()
+      )
+```
+
+keep only ABISnr that participated
+
+```{r}
+print("number of participants before filtering")
+print(length(participants_ABISnr))
+
+psoriasis_data_full <- psoriasis_data_full %>%
+  dplyr::filter(ABISnr %in% participants_ABISnr)
+
+print("number of participants after filtering")
+print(nrow(psoriasis_data_full))
+
+print("number of first order heredity psoriasis cases")
+print(psoriasis_data_full %>% 
+        dplyr::filter(first_degree_psoriasis_heredity == 1) %>%
+        nrow()
+      )
+
+
+print("number of psoriasis cases")
+print(psoriasis_data_full %>% 
+        dplyr::filter(Diagnos == 1) %>%
+        nrow()
+      )
+```
+
+
+subset data to include only variables of interest and outcome
+
+```{r}
+puberty_age <- 13
+
+lower_age_puberty <- "psoriasis before age 13"
+upper_age_puberty <- "psoriasis after age 13"
+
+psoriasis_detection_age_data <- psoriasis_data_full[,c("ABISnr",
+                                         "age_first_detection",
+                                         "age_second_detection")] %>% 
+ dplyr::mutate(age_first_detection_cat = case_when(
+    age_first_detection < puberty_age ~ lower_age_puberty,
+    age_first_detection >= puberty_age ~ upper_age_puberty, 
+    TRUE ~ "Not detected")
+    )
+
+```
+
+```{r}
+explanatory_vars <- names(psoriasis_data_full)[
+  !(names(psoriasis_data_full) %in% 
+      c("ABISnr", "Diagnos", 
+        "age_first_detection",
+        "age_second_detection",
+        "AutoimmDisease")
+    )
+  ]
+psoriasis_data_full <- psoriasis_data_full[,c("ABISnr", 
+                                              explanatory_vars,
+                                              "Diagnos")]
+
+
+```
+
+
+
+```{r}
+categorical_explanatory_vars <- names(
+  psoriasis_data_full)[!(names(psoriasis_data_full) %in% 
+                           c("ABISnr",
+                             "fr_12",
+                             "infection_frequency",
+                             "first_degree_psoriasis_heredity",
+                             "Diagnos",
+                             "time",
+                             "event"))]
+
+```
+
+variable value label correspondence data frame
+
+```{r}
+explanatory_vars_df <- data.frame(
+  v = character(), 
+  v_labels = character(),
+  labels = character()
+  )
+
+
+for (col in categorical_explanatory_vars){
+  if(col %in% c("time", "event")){
+    next
+  }
+  curr_label <- attr(abis_table[[col]], "labels")
+  
+  print(col)
+  
+  v <-list(col)
+  if(!is.null(curr_label)){  
+    v_labels <- list(attr(abis_table[[col]], "labels"))
+    curr_dt <- data.frame(I(v[[1]]), I(v_labels[[1]]))
+    curr_dt[["labels"]] <- rownames(curr_dt)
+  } else {
+    v_labels <- levels(factor(abis_table[[col]]))
+    curr_dt <- data.frame(I(v[[1]]), I(v_labels))
+    curr_dt[["labels"]] <- paste0(v_labels," ")
+  }
+  colnames(curr_dt) <- c("variable", "value", "label")
+  
+  explanatory_vars_df <- rbind(explanatory_vars_df,curr_dt)
+}
+
+rownames(explanatory_vars_df) <- seq(1,dim(explanatory_vars_df)[1])
+colnames(explanatory_vars_df) <- c("variable", "value", "label")
+```
+
+```{r}
+explanatory_vars_df <- explanatory_vars_df %>% 
+  rbind(list(variable = rep("first_degree_psoriasis_heredity",2), 
+             value = seq(0,1), 
+             label = c("No", "Yes")
+             )
+        )
+```
+
+
+answer not given
+
+```{r}
+ambiguous_answer <- explanatory_vars_df[((explanatory_vars_df$label %in% c(
+              "do not know",
+              "Do not know",
+              "don't know", 
+              "dont know", 
+              "don`t know"))),]
+
+for (v in ambiguous_answer$variable) {
+  value2replace <- ambiguous_answer[ambiguous_answer$variable == v,]$value
+  psoriasis_data_full[[v]][which(psoriasis_data_full[[v]] == value2replace)] <- NA
+}
+```
+
+```{r}
+explanatory_vars_df <- explanatory_vars_df[
+  (!(explanatory_vars_df$label %in% c(
+    "do not know",
+    "Do not know",
+    "don't know",
+    "dont know",
+    "don`t know"))),]
+
+expected_values_df <- explanatory_vars_df %>% 
+  group_by(variable) %>%
+  summarise(min_val = min(value),max_val = max(value))
+```
+
+save original data with missing values factorize variables that are to be treated as categorical before imputation is carried out
+```{r}
+unfactored_original_psoriasis_data_full <- psoriasis_data_full
+```
+
+
+```{r}
+for (cv in unlist(all_parameters$category_variable)){
+  
+  curr_parameters <- all_parameters[all_parameters$category_variable == cv,]
+  psoriasis_data_full <- categorise_variable(psoriasis_data_full,
+                          variable2categorise = curr_parameters$variable2categorise[[1]],
+                          category_variable = curr_parameters$category_variable[[1]],
+                          breaks = curr_parameters$breaks[[1]],
+                          labels = curr_parameters$labels[[1]]
+)
+  psoriasis_data_full[[cv]] <- droplevels(psoriasis_data_full[[cv]])
+}
+
+
+psoriasis_data_full[["Diagnos"]] <- factor(psoriasis_data_full[["Diagnos"]])
+```
+
+remove variables that have been recoded to categorical variables
+
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%
+  dplyr::select(-all_of(categorical_explanatory_vars)) 
+
+# rename Gestational variable
+psoriasis_data_full["Gestational_age"] <- psoriasis_data_full$fr_12
+psoriasis_data_full$fr_12 <- NULL
+psoriasis_data_full$first_degree_psoriasis_heredity <- NULL
+psoriasis_data_full$infection_frequency <- NULL
+```
+
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%
+  dplyr::select(
+    all_of(names(psoriasis_data_full)[c(1,4:ncol(psoriasis_data_full),2,3)])
+  )
+```
+
+check if factors need re-ordering
+```{r}
+for (i in seq_along(names(psoriasis_data_full))) {
+  voi = names(psoriasis_data_full)[[i]]
+  print(paste(i,": ",voi))
+  if(is.factor(psoriasis_data_full[[voi]])){
+    if(!(voi %in% c("ABISnr", "Diagnos","time", "event"))){
+      print(tabyl(psoriasis_data_full, !!sym(voi), Diagnos))
+    }
+  }
+}
+```
+
+```{r}
+print(names(psoriasis_data_full)[c(3:14,19:20)])
+```
+
+
+
+re-order some of the levels
+```{r}
+for (voi in names(psoriasis_data_full)[c(3:14,19:20)]) {
+   old_levels = levels(psoriasis_data_full[[voi]])
+   psoriasis_data_full[[voi]] <- factor(psoriasis_data_full[[voi]],
+       levels = rev(old_levels)
+   ) 
+}
+psoriasis_data_full$Infection_frequency_cat <- factor(
+  psoriasis_data_full$Infection_frequency_cat, 
+  levels = c("1\u20132 times","3\u20135 times","6 times or more", "Never"))
+```
+
+```{r}
+print(psoriasis_data_full %>% tabyl(Mumps, Diagnos))
+print(psoriasis_data_full %>% tabyl(Rubella, Diagnos))
+print(psoriasis_data_full %>% tabyl(Measles, Diagnos))
+```
+
+remove factors that have no or very few outcomes to minimize unstable results
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%
+  dplyr::select(-c(Measles, Mumps, Rubella))
+
+all_parameters <- all_parameters %>% 
+  dplyr::filter(!(category_variable %in% c("Measles", "Mumps", "Rubella")))
+```
+
+explore missingness before imputations select possible variables to exclude (with reason)
+
+```{r}
+# missingness per variable
+P <-sapply(psoriasis_data_full, function(x) mean(is.na(x)))
+print("variables with more than 50% missing values")
+print(P[P>0.5])
+```
+
+drop factors with over 50% missing values 
+
+save data compatible for cox-proportional hazard analysis.
+Use:
+
+cox_data <- read_sav(paste0(output_dir, "/original_cox_data_year_1.sav"))
+cox_data <- cox_data %>%
+    mutate(across(where(is.labelled), as_factor))
+    
+to preserve factors when using later
+```{r}
+haven::write_sav(data = psoriasis_data_full,
+                 path = paste0(output_dir, "/original_cox_data_year_1.sav"))
+```
+
+discard time and event columns
+```{r}
+psoriasis_data_full <- psoriasis_data_full %>%
+  dplyr::select(-time,-event)
+```
+
+impute missing entries: parallel
+
+```{r}
+number_of_imputations <- nimpute(psoriasis_data_full, method = "avg")
+print("number of imputations based on mean missingness")
+print(number_of_imputations)
+```
+
+
+```{r}
+n_core = detectCores()
+number_imputation_per_core = 2
+
+imp_parallel <- futuremice(
+  psoriasis_data_full, 
+  m = number_of_imputations,
+  parallelseed = 123456,
+  n.core = n_core,
+  seed = ifelse(n_core == 1,12345, NA),
+  use.logical = TRUE,
+  n.imp.core = number_imputation_per_core,
+  maxit = 0
+  )
+
+pred <- imp_parallel$predictorMatrix
+
+# removes the variable ABISnr from the set of predictors, but still leaves it to be predicted by the other variables.
+pred[,"ABISnr"] <- 0
+pred[c("Common_cold_dichotomous_cat", "Gastroenteritis_dichotomous_cat",
+      "Infection_requiring_penicillin_dichotomous_cat",
+      "Influenza_dichotomous_cat"),"Infection_frequency_cat"] <- 0
+
+post <- imp_parallel$post
+
+post["Gestational_age"] <-  "imp[[j]][, i] <- squeeze(imp[[j]][, i], c(25, 43))"
+
+```
+
+parallel imputation run
+
+```{r}
+start_time <- Sys.time()
+
+imp_parallel <- futuremice(
+            psoriasis_data_full, 
+            m = number_of_imputations,
+            parallelseed = 123456,
+            n.core = n_core,
+            seed = ifelse(n_core == 1,12345, NA),
+            use.logical = TRUE,
+            n.imp.core = number_imputation_per_core,
+            predictorMatrix = pred,
+            post = post,
+            maxit = 10,
+            progress = TRUE)
+
+end_time <- Sys.time()
+print("parallel imputation time")
+print(end_time - start_time)
+```
+
+impute, then transform
+```{r}
+long <- mice::complete(imp_parallel, "long", include = TRUE)
+long$Streptococcal_infections <- with(long, ifelse(is.na(Otitis)|is.na(Infection_requiring_penicillin_dichotomous_cat),
+                                  NA,
+                                  ifelse(
+                                    ((Otitis=="Yes")&(Infection_requiring_penicillin_dichotomous_cat == "At least once")),
+                                    "At least once","Never")))
+
+long$Streptococcal_infections <- with(long, factor(Streptococcal_infections, levels = c("Never","At least once")))
+
+long$Influenza_or_other_infection <- with(long, ifelse(is.na(Other_infection)&is.na(Influenza_dichotomous_cat),
+                                  NA,
+                                  ifelse(
+                                    ((Other_infection=="Yes")|(Influenza_dichotomous_cat == "At least once")),
+                                    "Yes","No")))
+
+long$Influenza_or_other_infection <- with(long, factor(Influenza_or_other_infection, levels = c("No","Yes")))
+
+
+long$Respiratory_infections_WCIP <- with(long, ifelse((is.na(Whooping_cough)) &
+                                                     (is.na(Common_cold_dichotomous_cat)) &
+                                                     (is.na(Influenza_dichotomous_cat)) & (is.na(Pneumonia)),
+                                                   NA,
+                                                   ifelse(((Whooping_cough == "Yes") |
+                                                             (Common_cold_dichotomous_cat == "At least once") |
+                                                             (Influenza_dichotomous_cat == "At least once") |
+                                                             (Pneumonia == "Yes")
+                                                   ), "At least once", "Never")
+))
+
+long$Respiratory_infections_WCIP <- with(long, factor(Respiratory_infections_WCIP, levels = c("Never","At least once")))
+
+long$Respiratory_infections_WCP <- with(long, ifelse((is.na(Whooping_cough)) &
+                                                     (is.na(Common_cold_dichotomous_cat)) &
+                                                     (is.na(Pneumonia)),
+                                                   NA,
+                                                   ifelse(((Whooping_cough == "Yes") |
+                                                             (Common_cold_dichotomous_cat == "At least once") |
+                                                             (Pneumonia == "Yes")
+                                                   ), "At least once", "Never")
+))
+
+long$Respiratory_infections_WCP <- with(long, factor(Respiratory_infections_WCP, levels = c("Never","At least once")))
+
+imp_parallel <- as.mids(long)
+```
+
+extract imputed data
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_full <- complete(imp_parallel)
+original_psoriasis_data_full <- complete(imp_parallel, action = 0)
+```
+
+fit univariate logistic regression models using complete-case data
+```{r warning=FALSE}
+variables2test <- names(original_psoriasis_data_full)[c(3:11,23:24,25:26,12:22)]
+
+original_cc_univariate_regression_table <- complete_case_univariate_logistic_regression(variables2test, original_psoriasis_data_full)
+original_cc_univariate_regression_table <- add_pvalue_correction(original_cc_univariate_regression_table)
+```
+
+fit multivariable logistic regression models complete-case data
+
+```{r warning=FALSE}
+variables2test <- names(original_psoriasis_data_full)[c(3:11,23:24,25:26,12:16)]
+
+original_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_full)
+original_cc_multivariable_regression_table <- add_pvalue_correction(original_cc_multivariable_regression_table)
+```
+
+
+fit univariate logistic regression models and pool parallel imputation data
+
+```{r}
+variables2test <- names(imp_parallel$data)[c(3:11,23:24,25:26,12:22)]
+
+full_imputed_univariate_regression_table <- imputed_univariate_logistic_regression(variables2test, imp_parallel)
+full_imputed_univariate_regression_table <- add_pvalue_correction(full_imputed_univariate_regression_table)
+```
+
+
+fit multivariable logistic regression models and pool parallel imputation data
+
+``` {r}
+variables2test <- names(imp_parallel$data)[c(3:11,23:24,25:26,12:16)]
+
+full_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel)
+full_imputed_multivariable_regression_table <- add_pvalue_correction(full_imputed_multivariable_regression_table) 
+```
+
+forest plot
+
+```{r}
+df2plot <- original_cc_univariate_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half = half_mark(df2plot)
+  
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = "  year 1 complete-case: univariate regression model",
+  univariate = TRUE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "A_cc_univariate_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = "  year 1 complete-case: univariate regression model",
+  univariate = TRUE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "B_cc_univariate_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+
+```{r}
+df2plot <- original_cc_multivariable_regression_table  %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half = half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "A_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "B_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- full_imputed_univariate_regression_table[-c(56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+  
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 imputed: univariate regression model",
+  univariate = TRUE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_imp_univariate_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 imputed: univariate regression model",
+  univariate = TRUE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_imp_univariate_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- full_imputed_multivariable_regression_table[-c(56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+subgroups: puberty age psoriasis detection data set
+
+```{r}
+post_puberty_case_control_abis <- (
+  psoriasis_detection_age_data %>% 
+    dplyr::filter(age_first_detection_cat %in% c("Not detected",
+                                          "psoriasis after age 13")))$ABISnr
+
+pre_puberty_case_control_abis <- (
+  psoriasis_detection_age_data %>% 
+    dplyr::filter(age_first_detection_cat %in% c("Not detected",
+                                          "psoriasis before age 13")))$ABISnr
+
+imp_parallel_post_puberty <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% post_puberty_case_control_abis)
+
+imp_parallel_pre_puberty <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% pre_puberty_case_control_abis)
+```
+
+psoriasis cases split for puberty age detection data
+
+```{r}
+print("psoriasis cases ")
+nrow(original_psoriasis_data_full %>% dplyr::filter(Diagnos == 1))
+
+print(paste("psoriasis cases < ", as.character(puberty_age)))
+nrow(imp_parallel_pre_puberty$data %>% dplyr::filter(Diagnos == 1))
+
+print(paste("psoriasis cases > ", as.character(puberty_age)))
+nrow(imp_parallel_post_puberty$data %>% dplyr::filter(Diagnos == 1))
+```
+
+a. post puberty
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_post_puberty <- complete(imp_parallel_post_puberty)
+original_psoriasis_data_post_puberty <- complete(imp_parallel_post_puberty, action = 0)
+```
+
+fit multivariable logistic regression models complete-case post puberty data
+```{r, message=FALSE, warning=FALSE}
+variables2test <- names(original_psoriasis_data_post_puberty)[c(3:11,23:24,25:26,12:16)]
+
+post_puberty_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_post_puberty)
+post_puberty_cc_multivariable_regression_table <- add_pvalue_correction(post_puberty_cc_multivariable_regression_table)
+```
+
+fit multivariable logistic regression models imputed post puberty data
+``` {r warning=FALSE}
+variables2test <- names(imp_parallel_post_puberty$data)[c(3:11,23:24,25:26,12:16)]
+
+post_puberty_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_post_puberty)
+post_puberty_imputed_multivariable_regression_table <- add_pvalue_correction(post_puberty_imputed_multivariable_regression_table)
+```
+
+
+forest plot
+```{r, message=FALSE, warning=FALSE}
+df2plot <- post_puberty_cc_multivariable_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot,
+  title = " Year 1 post puberty complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "post_puberty_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r, message=FALSE, warning=FALSE}
+df2plot <- post_puberty_imputed_multivariable_regression_table[-c(34:39,40:42,56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot,
+  title = " Year 1 post puberty imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "post_puberty_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+
+save_forest_plot(forest_plot, filename)
+```
+
+b. pre puberty
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_pre_puberty <- complete(imp_parallel_pre_puberty)
+original_psoriasis_data_pre_puberty <- complete(imp_parallel_pre_puberty, action = 0)
+```
+
+fit multivariable logistic regression models complete-case pre puberty data
+```{r, message=FALSE, warning=FALSE}
+variables2test <- names(original_psoriasis_data_pre_puberty)[c(3:11,23:24,25:26,12:16)]
+
+pre_puberty_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_pre_puberty)
+pre_puberty_cc_multivariable_regression_table <- add_pvalue_correction(pre_puberty_cc_multivariable_regression_table)
+```
+
+``` {r, message=FALSE, warning = FALSE}
+variables2test <- names(imp_parallel_pre_puberty$data)[c(3:11,23:24,25:26,12:16)]
+
+pre_puberty_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_pre_puberty)
+pre_puberty_imputed_multivariable_regression_table <- add_pvalue_correction(pre_puberty_imputed_multivariable_regression_table) 
+```
+
+
+forest plot
+```{r}
+df2plot <- pre_puberty_cc_multivariable_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 pre puberty complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "A_pre_puberty_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 pre puberty complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "B_pre_puberty_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+
+```
+
+```{r}
+df2plot <- pre_puberty_imputed_multivariable_regression_table[-c(25:27,56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 pre puberty imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_pre_puberty_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 pre puberty imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_pre_puberty_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+subgroups: sex specific data
+
+```{r}
+boys_case_control_abis <- (unfactored_original_psoriasis_data_full %>% 
+    dplyr::filter(Gender == 0))$ABISnr
+
+girls_case_control_abis <- (unfactored_original_psoriasis_data_full %>% 
+    dplyr::filter(Gender == 1))$ABISnr
+
+imp_parallel_boys <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% boys_case_control_abis)
+
+imp_parallel_girls <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% girls_case_control_abis)
+
+```
+
+psoriasis cases split for boys and girls specific data
+
+```{r}
+print("psoriasis cases ")
+nrow(original_psoriasis_data_full %>% dplyr::filter(Diagnos == 1))
+
+print("psoriasis cases in boys")
+nrow(imp_parallel_boys$data %>% dplyr::filter(Diagnos == 1))
+
+print("psoriasis cases in girls")
+nrow(imp_parallel_girls$data %>% dplyr::filter(Diagnos == 1))
+
+```
+
+
+a. girls
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_girls <- complete(imp_parallel_girls)
+original_psoriasis_data_girls <- complete(imp_parallel_girls, action = 0)
+```
+
+fit multivariable logistic regression models complete-case girls data
+```{r warning=FALSE}
+variables2test <- names(original_psoriasis_data_girls)[c(3:11,23:24,25:26,12:16)]
+
+girls_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_girls, sex_specific = TRUE)
+girls_cc_multivariable_regression_table <- add_pvalue_correction(girls_cc_multivariable_regression_table)
+```
+
+
+``` {r warning=FALSE}
+variables2test <- names(imp_parallel_girls$data)[c(3:11,23:24,25:26,12:16)]
+
+girls_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_girls, sex_specific = TRUE)
+girls_imputed_multivariable_regression_table <- add_pvalue_correction(girls_imputed_multivariable_regression_table)
+```
+
+
+forest plot
+```{r warning=FALSE, message=FALSE, results='hide', echo=FALSE}
+df2plot <- girls_cc_multivariable_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 girls complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "A_girls_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 girls complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "B_girls_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- girls_imputed_multivariable_regression_table[-c(56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 girls imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_girls_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 girls imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_girls_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+b. boys
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_boys <- complete(imp_parallel_boys)
+original_psoriasis_data_boys <- complete(imp_parallel_boys, action = 0)
+```
+
+fit multivariable logistic regression models complete-case boys data
+```{r warning=FALSE}
+variables2test <- names(original_psoriasis_data_boys)[c(3:11,23:24,25:26,12:16)]
+
+boys_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_boys, sex_specific = TRUE)
+boys_cc_multivariable_regression_table <- add_pvalue_correction(boys_cc_multivariable_regression_table)
+```
+
+
+fit multivariable logistic regression models using 
+``` {r}
+variables2test <- names(imp_parallel_boys$data)[c(3:11,23:24,25:26,12:16)]
+
+boys_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_boys, sex_specific = TRUE)
+boys_imputed_multivariable_regression_table <- add_pvalue_correction(boys_imputed_multivariable_regression_table) 
+```
+
+
+forest plot
+```{r}
+df2plot <- boys_cc_multivariable_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot,
+  title = " Year 1 boys complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "boys_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- boys_imputed_multivariable_regression_table[-c(34:39,40:42,56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 boys imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_boys_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 boys imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_boys_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+
+```{r}
+cases_confirmed <- (imp_parallel$data %>% dplyr::filter(Diagnos == 1))$ABISnr
+severity %>% dplyr::filter(!(ABISnr %in% cases_confirmed))
+
+severity <- severity %>% dplyr::filter(ABISnr %in% cases_confirmed)
+severity <- severity %>% dplyr::mutate(severity_new=ifelse(is.na(severity),"mild",severity))
+```
+
+group by psoriasis disease severity
+
+```{r}
+abis_mild <- (severity %>% dplyr::filter(severity_new == "mild"))$ABISnr
+abis_severe <- (severity %>% dplyr::filter(severity_new == "severe"))$ABISnr
+
+abis_healthy <- (unfactored_original_psoriasis_data_full %>% 
+  dplyr::filter(Diagnos == 0))$ABISnr
+
+mild_case_control_abis <- c(abis_healthy,abis_mild)
+severe_case_control_abis <- c(abis_healthy,abis_severe)
+```
+
+```{r}
+imp_parallel_mild <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% mild_case_control_abis)
+
+imp_parallel_severe <- imp_parallel %>% 
+  dplyr::filter(ABISnr %in% severe_case_control_abis)
+```
+
+psoriasis cases split for mild and severe 
+
+```{r}
+print("psoriasis cases ")
+nrow(original_psoriasis_data_full %>% dplyr::filter(Diagnos == 1))
+
+print("mild psoriasis cases")
+nrow(imp_parallel_mild$data %>% dplyr::filter(Diagnos == 1))
+
+print("severe psoriasis cases")
+nrow(imp_parallel_severe$data %>% dplyr::filter(Diagnos == 1))
+
+```
+
+
+a. severe
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_severe <- complete(imp_parallel_severe)
+original_psoriasis_data_severe <- complete(imp_parallel_severe, action = 0)
+```
+
+fit multivariable logistic regression models complete-case severe data
+```{r}
+# variables2test <- names(original_psoriasis_data_severe)[c(3:11,23:24,12:16)]
+# 
+# severe_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_severe)
+# severe_cc_multivariable_regression_table <- add_pvalue_correction(severe_cc_multivariable_regression_table)
+```
+
+``` {r warning=FALSE}
+variables2test <- names(imp_parallel_severe$data)[c(3:11,23:24,25:26,12:16)] 
+
+severe_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_severe)
+severe_imputed_multivariable_regression_table <- add_pvalue_correction(severe_imputed_multivariable_regression_table) 
+```
+
+forest plot
+```{r}
+# df2plot <- severe_cc_multivariable_regression_table %>%
+#   dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+# 
+# forest_plot <- forest_from_table(
+#   df2plot = df2plot,
+#   title = " Year 1 severe complete-case: multivariable regression model",
+#   univariate = FALSE, imputed_output = FALSE)
+# 
+# filename <-paste(output_dir, "severe_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+# save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- severe_imputed_multivariable_regression_table[-c(1:6,22:27,34:39,40:42,56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot,
+  title = " Year 1 severe imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "severe_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+
+save_forest_plot(forest_plot, filename)
+```
+
+b. mild
+
+```{r}
+# extract imputed data
+
+imputed_psoriasis_data_mild <- complete(imp_parallel_mild)
+original_psoriasis_data_mild <- complete(imp_parallel_mild, action = 0)
+```
+
+fit multivariable logistic regression models complete-case mild data
+```{r warning=FALSE}
+variables2test <- names(original_psoriasis_data_mild)[c(3:11,23:24,25:26,12:16)]
+
+mild_cc_multivariable_regression_table <- complete_case_multivariable_logistic_regression(variables2test, original_psoriasis_data_mild)
+mild_cc_multivariable_regression_table <- add_pvalue_correction(mild_cc_multivariable_regression_table)
+```
+
+
+``` {r}
+variables2test <- names(imp_parallel_mild$data)[c(3:11,23:24,25:26,12:16)]
+
+mild_imputed_multivariable_regression_table <- imputed_multivariable_logistic_regression(variables2test, imp_parallel_mild)
+mild_imputed_multivariable_regression_table <- add_pvalue_correction(mild_imputed_multivariable_regression_table) 
+```
+
+
+forest plot
+
+```{r}
+df2plot <- mild_cc_multivariable_regression_table %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 mild complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "A_mild_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 mild complete-case: multivariable regression model",
+  univariate = FALSE, imputed_output = FALSE)
+
+filename <-paste(output_dir, "B_mild_cc_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+```{r}
+df2plot <- mild_imputed_multivariable_regression_table[-c(56),] %>%
+  dplyr::select(term, no, yes, estimate, p.value, conf.low, conf.high, p.bon, p.bh)
+
+one_half <- half_mark(df2plot)
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c(1:one_half),],
+  title = " Year 1 mild imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "A_mild_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+
+
+forest_plot <- forest_from_table(
+  df2plot = df2plot[c((one_half+1):nrow(df2plot)),],
+  title = " Year 1 mild imputed: multivariable regression model",
+  univariate = FALSE, imputed_output = TRUE)
+
+filename <-paste(output_dir, "B_mild_imp_multivariable_forest_plot_infection_antibiotic_year_1.jpeg", sep = "/")
+save_forest_plot(forest_plot, filename)
+```
+
+
+
+
+save all the output tables
+```{r}
+dataframes2save <- to_vec(for (t in names(which(unlist(eapply(.GlobalEnv,is.data.frame))))) if(grepl("_regression_table",t)) t)
+
+dataframes2save_list <- to_list(for (t in dataframes2save) get(t))
+
+names(dataframes2save_list) <- dataframes2save
+
+filename <-paste(output_dir,"infection_and_antibiotic_year_1.xlsx", sep = "/")
+writexl::write_xlsx(dataframes2save_list, path = filename)
+
+# save first imputation instance
+filename <-paste(output_dir,"first_imputation_instance_infection_and_antibiotic_year_1.xlsx", sep = "/")
+writexl::write_xlsx(imputed_psoriasis_data_full, path = filename)
+```
+
+save mids objects for year-1 imputations
+```{r}
+mids2save <- to_vec(for (t in names(which(unlist(eapply(.GlobalEnv,is.mids))))) if(grepl("imp_",t)) t)
+
+for(imd in mids2save){
+  saveRDS(get(imd), file = paste0(output_dir, "/",imd,"_year_1.rds"))
+}
+```
+
+
+```{r}
+psoriasis_detection_age_data_with_inf_txt <- dplyr::full_join(
+  psoriasis_detection_age_data,
+  abis_table_original_infection_txt,
+  by = "ABISnr"
+)
+
+original_psoriasis_data_full_with_inf_txt <- dplyr::left_join(
+  original_psoriasis_data_full,
+  psoriasis_detection_age_data_with_inf_txt,
+  by = "ABISnr"
+)
+```
+
+```{r}
+columns2print <- c(
+  "ABISnr",
+  "Diagnos",
+  "severity",
+  "b_12txt",
+  "age_first_detection",
+  "Streptococcal_infections",
+  "Respiratory_infections_WCIP",
+  "Respiratory_infections_WCP",
+  "age_first_detection_cat",
+  "Influenza_or_other_infection",
+  names(original_psoriasis_data_full_with_inf_txt)[!(
+    names(original_psoriasis_data_full_with_inf_txt) %in% c(
+      "ABISnr",
+      "Diagnos",
+      "severity",
+      "b_12txt",
+      "age_first_detection",
+      "Streptococcal_infections",
+      "Influenza_or_other_infection",
+      "Respiratory_infections_WCIP",
+      "Respiratory_infections_WCP",
+      "age_first_detection_cat",
+      "age_second_detection"
+      
+    )
+  )]
+)
+
+write.table(
+  original_psoriasis_data_full_with_inf_txt %>%
+    dplyr::filter(Diagnos == 1) %>%
+    dplyr::mutate(
+      severity = case_when(
+        ABISnr %in% severe_case_control_abis ~ "severe",
+        ABISnr %in% mild_case_control_abis ~ "mild",
+      )
+    ) %>%
+    dplyr::select(all_of(columns2print)) %>%
+    dplyr::arrange(age_first_detection),
+  file = paste0(
+    output_dir,
+    "/cases_other_infection_detection_age_year_1.csv",
+    collapse = ""
+  ),
+  row.names = FALSE,
+  quote = FALSE,
+  sep = ","
+)
+```
+
+onset age association 
+```{r}
+cases_onset_data <- dplyr::left_join(
+  original_psoriasis_data_full, 
+  psoriasis_detection_age_data, 
+  by = "ABISnr") %>% 
+  dplyr::filter(Diagnos==1)
+
+features2test <- names(original_psoriasis_data_full)[c(3:16,22:24)]
+
+mean_age_table_all <- NULL
+t_test_table_all <- NULL
+wilcox_table_all <- NULL
+
+for(i in seq_along(features2test)){
+  
+  f <- features2test[[i]] 
+    
+  data2test <- cases_onset_data %>%
+    dplyr::filter(!(is.na(!!sym(f))))
+  
+  counts <- data2test %>% dplyr::count(!!sym(f))
+  
+  if(dim(counts %>% dplyr::filter(n>2))[1]==2){
+    
+    results <- age_of_onset_vs_feature(data2test, f)
+    
+    mean_age_table <- results[[1]]
+    names(mean_age_table)[1] <- "feature"
+    mean_age_table <- rbind(data.frame(feature=f, mean_age=NA), mean_age_table)
+    
+    t_test_table <- results[[2]] %>% dplyr::mutate_if(is.numeric, round,3)
+    t_test_table["feature"] <- f
+    
+    wilcox_table <- results[[3]] %>% dplyr::mutate_if(is.numeric, round,3)
+    wilcox_table["feature"] <- f
+    
+    if(exists("t_test_table_all")){
+      mean_age_table_all <- rbind(mean_age_table_all, mean_age_table)
+      t_test_table_all <- rbind(t_test_table_all, t_test_table)
+      wilcox_table_all <- rbind(wilcox_table_all, wilcox_table)
+    } else{
+      mean_age_table_all <- mean_age_table
+      t_test_table_all <- t_test_table
+      wilcox_table_all <- wilcox_table
+    }
+  
+  }
+  
+}
+
+mean_age_table_all["variable_name"] <- comprehenr::to_vec(
+  for(f in mean_age_table_all$feature) 
+    if(f %in% c("At least once", "Never", "Yes", "No")) "" else f)
+
+mean_age_table_all$feature <- comprehenr::to_vec(
+  for(f in mean_age_table_all$feature) 
+    gsub("_"," ",
+         gsub("_cat","",
+              gsub("_dichotomous","",
+                   gsub("_12_36_month","",f)
+                   )
+              )
+         )
+  )
+
+t_test_table_all$feature <- comprehenr::to_vec(
+  for(f in t_test_table_all$feature) 
+    gsub("_"," ",
+         gsub("_cat","",
+              gsub("_dichotomous","",
+                   gsub("_12_36_month","",f)
+                   )
+              )
+         )
+  )
+
+wilcox_table_all$feature <- comprehenr::to_vec(
+  for(f in wilcox_table_all$feature) 
+    gsub("_"," ",
+         gsub("_cat","",
+              gsub("_dichotomous","",
+                   gsub("_12_36_month","",f)
+                   )
+              )
+         )
+  )
+
+writexl::write_xlsx(
+  x = mean_age_table_all, 
+  path = paste0(output_dir, "/mean_onsetage_table_year_1.xlsx")
+  )
+
+writexl::write_xlsx(
+  x = t_test_table_all, 
+  path = paste0(output_dir, "/t_test_onsetage_association_year_1.xlsx")
+  )
+
+writexl::write_xlsx(
+  x = wilcox_table_all, 
+  path = paste0(output_dir, "/wilcox_test_onsetage_association_year_1.xlsx")
+  )
+```
+
+Firth's Penalized Logistic Regression on original data
+
+original data
+```{r}
+predictors <- names(original_psoriasis_data_full)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_full)[c(17:22)]
+
+original_cc_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_full)
+original_cc_firth_logistic_regression_table <- do.call(rbind, original_cc_firth_logistic_regression_results)
+```
+
+```{r}
+flextable_original_cc_firth_logistic_regression_table <- suppressMessages(
+  original_cc_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+```
+
+subsets:
+(a) post-puberty cases and controls
+```{r}
+predictors <- names(original_psoriasis_data_post_puberty)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_post_puberty)[c(17:22)]
+
+original_cc_post_puberty_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_post_puberty)
+original_cc_post_puberty_firth_logistic_regression_table <- do.call(rbind, original_cc_post_puberty_firth_logistic_regression_results)
+```
+
+(b) pre-puberty cases and controls
+```{r}
+predictors <- names(original_psoriasis_data_pre_puberty)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_pre_puberty)[c(17:22)]
+
+original_cc_pre_puberty_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_pre_puberty)
+original_cc_pre_puberty_firth_logistic_regression_table <- do.call(rbind, original_cc_pre_puberty_firth_logistic_regression_results)
+```
+
+
+```{r}
+flextable_original_cc_post_puberty_firth_logistic_regression_table <- suppressMessages(
+  original_cc_post_puberty_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+
+flextable_original_cc_pre_puberty_firth_logistic_regression_table <- suppressMessages(
+  original_cc_pre_puberty_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+```
+
+
+(c) girls-only data
+```{r}
+predictors <- names(original_psoriasis_data_girls)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_girls)[c(17:20,22)]
+
+original_cc_girls_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_girls)
+original_cc_girls_firth_logistic_regression_table <- do.call(rbind, original_cc_girls_firth_logistic_regression_results)
+```
+
+(d) boys-only data
+```{r}
+predictors <- names(original_psoriasis_data_boys)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_boys)[c(17:20,22)]
+
+original_cc_boys_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_boys)
+original_cc_boys_firth_logistic_regression_table <- do.call(rbind, original_cc_boys_firth_logistic_regression_results)
+```
+
+
+
+```{r}
+flextable_original_cc_girls_firth_logistic_regression_table <- suppressMessages(
+  original_cc_girls_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+
+flextable_original_cc_boys_firth_logistic_regression_table <- suppressMessages(
+  original_cc_boys_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+```
+
+(e) mild-cases and controls
+```{r}
+predictors <- names(original_psoriasis_data_mild)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_mild)[c(17:22)]
+
+original_cc_mild_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_mild)
+original_cc_mild_firth_logistic_regression_table <- do.call(rbind, original_cc_mild_firth_logistic_regression_results)
+```
+
+(f) severe-cases and controls
+```{r}
+predictors <- names(original_psoriasis_data_severe)[c(3:11,23:24,25:26,12:16)]
+covariates <- names(original_psoriasis_data_severe)[c(17:22)]
+
+original_cc_severe_firth_logistic_regression_results <- lapply(predictors, run_firth_logistic, covariates = covariates, data = original_psoriasis_data_severe)
+original_cc_severe_firth_logistic_regression_table <- do.call(rbind, original_cc_severe_firth_logistic_regression_results)
+```
+
+```{r}
+flextable_original_cc_mild_firth_logistic_regression_table <- suppressMessages(
+  original_cc_mild_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+
+flextable_original_cc_severe_firth_logistic_regression_table <- suppressMessages(
+  original_cc_severe_firth_logistic_regression_table %>% 
+    dplyr::filter(!grepl("Exclusive|Education|Sex|First degree|Gestational",Predictor)) %>% 
+    add_evalues()
+  ) %>% display_flextable() %>%
+  flextable::color(
+        i = ~ grepl("Robust", `Remark`),
+        j = c(1,2,5),
+        color = c("blue", "orange","blue")
+  )
+```
+
+```{r}
+outdir <- "/Users/debda22/Projects/ingrid_asp_psoriasis_research_center/infection_antibiotic_year_wise/with_overall_freq_imputation_infection_antibiotic_firth_and_evalue_revision"
+
+if(!dir.exists(outdir)){
+  dir.create(outdir, recursive = TRUE)
+}
+
+```
+
+```{r}
+sect_properties <- officer::prop_section(
+  page_size = page_size(
+    orient = "landscape",
+    width = 8.3,
+    height = 11.7
+  ),
+  type = "continuous",
+  page_margins = page_mar()
+)
+```
+
+```{r}
+standardize_table <- function(ft, total_width = 8.3) {
+  ncols <- ncol(ft$body$dataset)
+  
+  # Weighting: columns 1,2,5 are wide (weight 2), columns 3,4 are narrow (weight 1)
+  weights <- rep(1, ncols)
+  weights[c(1, 2, 5)] <- c(4,2,3)
+  
+  # Normalize to fit total_width
+  col_widths <- total_width * (weights / sum(weights))
+  
+  ft %>%
+    autofit() %>% 
+    width(j = seq_len(ncols), width = col_widths) %>%
+    align(align = "left", part = "all") %>% # consistent alignment
+    valign(valign = "center", part = "all") %>%
+    flextable::font(fontname = "Times New Roman") %>%  # set font
+    flextable::fontsize(size = 10)       
+}
+```
+
+
+```{r}
+flextable::save_as_docx(
+  `Complete-case dataset` = standardize_table(flextable_original_cc_firth_logistic_regression_table),
+  `Post-puberty cases and controls dataset` = standardize_table(
+    flextable_original_cc_post_puberty_firth_logistic_regression_table
+  ),
+  `Pre-puberty cases and controls dataset` = standardize_table(
+    flextable_original_cc_pre_puberty_firth_logistic_regression_table
+  ),
+  `Girls-only cases and controls dataset` = standardize_table(
+    flextable_original_cc_girls_firth_logistic_regression_table
+  ),
+  `Boys-only cases and controls dataset` = standardize_table(flextable_original_cc_boys_firth_logistic_regression_table),
+  `Mild-cases and controls dataset` = standardize_table(flextable_original_cc_mild_firth_logistic_regression_table),
+  `Severe-cases and controls dataset` = standardize_table(
+    flextable_original_cc_severe_firth_logistic_regression_table
+  ),
+  path = paste0(outdir, "/year_1_firth_and_evalue_tables.docx"),
+  pr_section = sect_properties
+)
+```
+
+
