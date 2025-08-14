@@ -474,36 +474,7 @@ explanatory_vars_df <- explanatory_vars_df %>%
 ```
 
 
-answer not given
 
-```{r}
-ambiguous_answer <- explanatory_vars_df[((explanatory_vars_df$label %in% c(
-              "do not know",
-              "Do not know",
-              "don't know", 
-              "dont know", 
-              "don`t know"))),]
-
-for (v in ambiguous_answer$variable) {
-  value2replace <- ambiguous_answer[ambiguous_answer$variable == v,]$value
-  psoriasis_data_full[[v]][which(psoriasis_data_full[[v]] == value2replace)] <- NA
-}
-```
-
-
-```{r}
-explanatory_vars_df <- explanatory_vars_df[
-  (!(explanatory_vars_df$label %in% c(
-    "do not know",
-    "Do not know",
-    "don't know",
-    "dont know",
-    "don`t know"))),]
-
-expected_values_df <- explanatory_vars_df %>% 
-  group_by(variable) %>%
-  summarise(min_val = min(value),max_val = max(value))
-```
 
 save original data with missing values factorize variables that are to be treated as categorical before imputation is carried out
 
